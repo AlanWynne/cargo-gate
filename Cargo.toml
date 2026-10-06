@@ -1,0 +1,30 @@
+[package]
+name = "cargo-gate"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "A unified verification gate for Cargo projects: runs fmt, clippy, and nextest with per-step progress, history, and combined/review log artifacts."
+license = "MIT OR Apache-2.0"
+authors = ["Alan Wynne"]
+repository = "https://github.com/AlanWynne/cargo-gate"
+homepage = "https://github.com/AlanWynne/cargo-gate"
+readme = "README.md"
+keywords = ["cargo", "ci", "test", "clippy", "gate"]
+categories = ["development-tools::cargo-plugins", "command-line-utilities"]
+
+[[bin]]
+name = "cargo-gate"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+opt-level = 2
+strip = true

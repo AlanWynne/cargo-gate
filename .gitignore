@@ -1,0 +1,18 @@
+# Build output
+/target
+
+# cargo-gate's own artifact directory (when run against this repo itself)
+/.gate
+/.gate-selftest
+/.gate-verify
+
+# Ephemeral verification scratch (not part of the product)
+*.log
+*.done
+*.start
+
+# Editor / tool-specific local state (kept out of the public repo)
+/.kiro
+/.agents
+
+# Note: Cargo.lock IS committed for this binary crate (reproducible installs).
