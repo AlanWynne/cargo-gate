@@ -215,3 +215,215 @@ stale. On any failure it returns empty and the caller falls back to full
 - No config file; all configuration is CLI flags.
 - No JUnit/other machine export of the gate's own result (the history CSV is the
   structured output).
+
+## 8. The `report` subcommand -- workspace wiring report (new feature)
+
+This section EXTENDS the design for the new `cargo gate report` feature. It adds
+modules and a CLI subcommand; it does NOT change any decision in sections 1-7.
+The one deliberate change to a prior assumption is called out in 8.1.
+
+### 8.1 CLI shape: a real subcommand (change to the prior CLI model)
+
+PRIOR DECISION (section 2, `config`): `Cli` was a FLAT clap-derive struct of
+flags with no subcommands, and `main` always calls `gate::run`. The report
+feature requires a mode that does NOT run the gate, so this is a deliberate,
+owner-approved CHANGE to the CLI model: `Cli` gains an OPTIONAL subcommand.
+
+```
+Cli {
+    #[command(subcommand)] command: Option<Command>,  // NEW
+    // ... all existing flags unchanged ...
+}
+
+enum Command {
+    Report(ReportArgs),
+}
+```
+
+- WHEN `command` is `None` (no subcommand) the existing gate path runs with the
+  existing flags, byte-for-byte as before (Req 1.2). The flags stay on the top
+  -level `Cli` so `cargo gate --fast` etc. are untouched; only the NEW optional
+  subcommand is added. This keeps the change additive (Req 11.1, NFR-2).
+- WHEN `command` is `Some(Command::Report(args))` the new report path runs and
+  the gate is not invoked.
+
+`ReportArgs` (new, report-only flags):
+
+```
+ReportArgs {
+    /// Repeatable root override; an explicit list replaces auto-detection.
+    #[arg(long = "root", value_name = "CRATE")] roots: Vec<String>,
+    /// Output path override; default <log-dir>/gate.wiring-report.md.
+    #[arg(long = "report-out", value_name = "FILE")] out: Option<PathBuf>,
+    /// Log dir (shared meaning with the gate; default .gate).
+    #[arg(long, value_name = "DIR")] log_dir: Option<PathBuf>,
+}
+```
+
+Chosen flag names, recorded as the new public contract (Req 9, 11): subcommand
+`report`; `--root <CRATE>` (repeatable); `--report-out <FILE>`; `--log-dir <DIR>`
+(same meaning as the gate's). Semver: a MINOR bump (additive subcommand + flags).
+`Cargo.toml` `version` moves `0.1.0 -> 0.2.0` as part of this feature.
+
+`strip_subcommand_token` (drops the leading `gate` token for the cargo-subcommand
+invocation) is UNCHANGED and runs before clap parses; the new `report` token is a
+normal clap subcommand after that strip.
+
+### 8.2 Reuse of `workspace.rs` (NFR-5) -- extend, do not re-implement
+
+The report reuses the existing `workspace` module and extends it minimally:
+
+- `workspace_root(cargo, cwd)` -- reused as-is to resolve the output dir base.
+- `member_names(cargo, cwd)` -- reused as-is for the full member list.
+- `dependency_closure(cargo, cwd, root)` -- currently PRIVATE
+  (`fn dependency_closure`). CHANGE: make it `pub(crate)` so the report module
+  can compute a per-root closure. No behaviour change; same `cargo tree -p <root>
+  --edges normal --prefix none` parsing, same "root always included" guarantee,
+  same `Option<HashSet<String>>` return (None -> degraded closure of just the
+  root, Req 3.3).
+- `derive_orphans(cargo, cwd, closure_of)` -- the SINGLE-root orphan helper is
+  retained unchanged (the gate's `--app-only` still uses it). The report needs
+  the MULTI-root union, so it does NOT call `derive_orphans`; instead it computes
+  the union of per-root closures and subtracts from members (8.4). The two share
+  the same primitives (`member_names`, `dependency_closure`) so there is one
+  metadata/tree implementation, satisfying NFR-5.
+
+To support auto-detection (Req 2.2, 2.3) the module needs two facts the current
+`Metadata`/`Package` structs do not capture: each member's TARGET KINDS (to know
+which members produce a binary) and the inter-member dependency edges (to find
+top-of-tree libraries). This is additive to `workspace.rs`:
+
+- Extend the `Package` serde struct with `id`, `targets: Vec<Target>` (each
+  `Target { kind: Vec<String> }`) and `dependencies: Vec<Dep>` (each
+  `Dep { name: String }`), all parsed from the SAME `cargo metadata --no-deps`
+  call already made (no extra process). A new `pub(crate) fn workspace_facts(
+  cargo, cwd) -> Result<WorkspaceFacts>` returns a typed snapshot:
+  `WorkspaceFacts { members: Vec<MemberFact> }`, `MemberFact { name: CrateName,
+  produces_bin: bool, depends_on: Vec<CrateName> }`. Auto-detection reads this
+  snapshot; it is pure to test once the snapshot is built.
+
+Keeping the new metadata fields on the existing struct and behind one
+`cargo metadata` call preserves the "one metadata implementation" property.
+
+### 8.3 New module layout (400-line rule, split by concern)
+
+The report feature lives in a new `report_cmd` module split by concern so no file
+exceeds 400 non-test lines (rust-standards). `report.rs` (the gate's artifact
+writer) is NOT touched by this feature beyond reuse of `format_hms`.
+
+```
+src/report_cmd/
+  mod.rs        -- re-exports; `run_report(&ReportConfig) -> Result<i32>` entry
+  roots.rs      -- root auto-detection + override resolution (pure over WorkspaceFacts)
+  wiring.rs     -- union-closure, orphan derivation, attribution (pure data model)
+  summary.rs    -- read latest run from gate.history.csv into a RunSummary
+  render.rs     -- pure Markdown rendering: fn render_report(&Wiring, &Option<RunSummary>, &RootProvenance) -> String
+```
+
+- `roots.rs`, `wiring.rs`, and `render.rs` are PURE (no process spawning, no IO):
+  they take the `WorkspaceFacts` snapshot and the per-root closures as inputs, so
+  every acceptance criterion in Req 2-7 is unit-testable with in-memory fixtures
+  and string assertions (no cargo invocation in tests).
+- `mod.rs` and `summary.rs` do the IO: call `workspace::workspace_facts` /
+  `workspace::dependency_closure`, read the history CSV, and write the Markdown.
+- `main.rs` gains `mod report_cmd;` and dispatches: `Some(Command::Report) ->
+  report_cmd::run_report(...)` mapping the returned code to `ExitCode`
+  (0 success, 2 fatal/usage), exactly mirroring how `gate::run` is mapped today.
+
+### 8.4 Data model (newtypes over bare primitives, NFR-6)
+
+```
+struct CrateName(String);                 // newtype; Ord for deterministic sort
+
+enum RootProvenance { AutoDetected, UserSpecified }   // Req 2.6 / AC-15
+
+struct Roots { names: BTreeSet<CrateName>, provenance: RootProvenance }
+
+struct Wiring {
+    roots: Roots,
+    // wired-in crate -> the roots whose closure contains it (attribution, Req 5)
+    wired_in: BTreeMap<CrateName, BTreeSet<CrateName>>,
+    orphans: BTreeSet<CrateName>,          // Req 4
+    // per-root closure, retained for the tree section (Req 7.5)
+    closures: BTreeMap<CrateName, BTreeSet<CrateName>>,
+    degraded_roots: BTreeSet<CrateName>,   // closures that fell back to {root} (Req 3.3)
+}
+```
+
+`BTreeSet`/`BTreeMap` give deterministic, sorted iteration for free (Req 4.4,
+AC-7) without an explicit sort step. Public types derive `Debug`.
+
+Algorithm (all pure over `WorkspaceFacts` + per-root closures):
+
+- Auto-detect roots (`roots.rs`): `produces_bin` members UNION members that
+  appear in no other member's `depends_on` (top-of-tree libs). If `--root` is
+  non-empty, that list REPLACES auto-detection; validate each against
+  `facts.members` and return an error naming any unknown crate (Req 2.5, AC-3).
+  Empty-member workspace -> empty roots with an "empty workspace" note (Req 2.7).
+- Union closure + attribution (`wiring.rs`): for each root `r`, intersect its
+  `dependency_closure` with the member set; record `r` into `wired_in[c]` for
+  every `c` in that closure. `wired_in.keys()` is the union (Req 3.2);
+  `orphans = members - wired_in.keys() - roots` (Req 4.1, 4.2).
+
+### 8.5 Gate run summary sourcing from history (Req 8)
+
+`summary.rs` reads `gate.history.csv` (the existing long-format file) WITHOUT
+writing it. It reuses the CSV's known column order (documented in `history.rs`
+`HEADER`). It parses rows, groups by `run_id`, picks the LAST run_id in file
+order (file order is chronological, same assumption `history::read_rows` already
+relies on), and folds that run's per-step rows into a `RunSummary { verdict,
+steps: Vec<(step, duration, status)>, test_counts: Option<TestCounts> }`. The
+verdict is re-derived from the run's statuses using the SAME fold rule as
+`Verdict::from_results` (timeout dominates, then issues, else clean) so the report
+agrees with the gate. WHEN the file is absent or has no data rows, `summary.rs`
+returns `None` and `render.rs` emits the "no prior gate run recorded" note
+(Req 8.3, AC-10). A new lightweight row reader is added in `summary.rs` rather
+than exposing `history::read_rows`, because the summary needs the status/counts
+columns that `history::Row` currently discards; this keeps `history.rs`'s ETA
+reader untouched. `format_hms` from `report.rs` is reused for the timings.
+
+### 8.6 Markdown rendering (`render.rs`, pure)
+
+`render_report(...) -> String` builds the whole document as a `String` from the
+`Wiring`, the `Option<RunSummary>`, and the `RootProvenance`. It is pure and
+deterministic, so tests assert on substrings and section ordering (AC-8, AC-9,
+AC-14, AC-15). Section order matches Req 7.1-7.5. The honesty label (Req 6, 7.6)
+is emitted as a fixed ASCII block immediately under the "Wired-in crates"
+heading. The dependency-tree section (Req 7.5) renders each root's closure as an
+indented list derived from the retained `closures` data (a simple
+root-then-sorted-members block; it reuses the already-captured closure rather
+than shelling out to `cargo tree` a second time). All output is ASCII (Req 10.1).
+
+### 8.7 Error handling (new code)
+
+- A new `ReportError` enum via `thiserror` in `report_cmd` covers: `UnknownRoot`
+  (Req 2.5 -> exit 2), `Metadata` (cargo metadata failed -> exit 2), and
+  `WriteOutput { path }` (Req 9.4 -> exit 2). `mod.rs::run_report` maps any error
+  to a `2` return and a single ASCII `eprintln!`, mirroring `main`'s existing
+  fatal handling. No `unwrap`/`expect` in non-test code (NFR-6).
+- A per-root `cargo tree` failure is NOT fatal: it degrades that root's closure to
+  `{root}`, records the root in `degraded_roots`, and the report notes it
+  (Req 3.3). Only a metadata failure (can't even list members) is fatal.
+- Console output is ASCII and does not depend on a TTY (Req 10.1, 10.2); there is
+  no live bar in the report path at all.
+
+### 8.8 Testability
+
+- `roots.rs`, `wiring.rs`, `render.rs`: pure unit tests over in-memory
+  `WorkspaceFacts` and synthetic closures (AC-1..AC-9, AC-14, AC-15). No cargo
+  process is spawned in these tests, so they are deterministic and fast.
+- `summary.rs`: unit tests over a temp CSV fixture (AC-10, AC-11), following the
+  temp-file pattern already used in `history.rs` tests.
+- Path resolution (AC-12, AC-13) is a pure function
+  `resolve_report_path(out, log_dir, root) -> PathBuf` tested directly.
+- An integration smoke test (optional, consistent with section 6's "next")
+  builds the binary and runs `cargo gate report` against a fixture workspace,
+  asserting the file is written and contains the section headings.
+
+### 8.9 Semver / contract note (Req 11)
+
+This feature is strictly ADDITIVE: a new `report` subcommand, new report-only
+flags (`--root`, `--report-out`, `--log-dir` reused), and a new output file
+`gate.wiring-report.md`. No existing flag, the exit-code meanings (0/1/2), or the
+`gate.history.csv` columns change (the history file is read-only here). Per
+semver this is a MINOR release; `Cargo.toml` `version` goes `0.1.0 -> 0.2.0`.

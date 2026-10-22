@@ -19,6 +19,63 @@ struct Metadata {
 #[derive(Debug, Deserialize)]
 struct Package {
     name: String,
+    /// Compile targets of this package; used to tell whether it produces a
+    /// binary. Absent in some metadata shapes, so it defaults to empty.
+    #[serde(default)]
+    targets: Vec<Target>,
+    /// Declared dependencies of this package (by name). Used to find
+    /// top-of-tree libraries (members no other member depends on).
+    #[serde(default)]
+    dependencies: Vec<Dep>,
+}
+
+/// A compile target within a package (`lib`, `bin`, `test`, ...).
+#[derive(Debug, Deserialize)]
+struct Target {
+    #[serde(default)]
+    kind: Vec<String>,
+}
+
+/// A single declared dependency (only its name is needed here).
+#[derive(Debug, Deserialize)]
+struct Dep {
+    name: String,
+}
+
+// === Workspace facts (for root auto-detection) ======================
+
+/// A workspace member crate name. Newtype over `String` so sorting and set
+/// membership read as crate-name operations rather than bare strings.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CrateName(pub String);
+
+impl CrateName {
+    /// The underlying crate name as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CrateName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// One workspace member's facts relevant to root detection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberFact {
+    pub name: CrateName,
+    /// True when the member has at least one binary target.
+    pub produces_bin: bool,
+    /// Names of this member's declared dependencies (any edge kind).
+    pub depends_on: Vec<CrateName>,
+}
+
+/// A typed snapshot of the workspace from a single `cargo metadata` call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceFacts {
+    pub members: Vec<MemberFact>,
 }
 
 /// Resolve the workspace root via `cargo metadata`. Falls back to the current
@@ -32,6 +89,37 @@ pub fn workspace_root(cargo: &str, cwd: &Path) -> Result<PathBuf> {
 pub fn member_names(cargo: &str, cwd: &Path) -> Result<Vec<String>> {
     let meta = metadata(cargo, cwd)?;
     Ok(meta.packages.into_iter().map(|p| p.name).collect())
+}
+
+/// Build a typed workspace snapshot from a single `cargo metadata --no-deps`
+/// call, reusing the one metadata implementation (NFR-5).
+pub fn workspace_facts(cargo: &str, cwd: &Path) -> Result<WorkspaceFacts> {
+    let meta = metadata(cargo, cwd)?;
+    Ok(facts_from_metadata(meta))
+}
+
+/// Pure transform from parsed metadata to the workspace-facts snapshot. Kept
+/// separate from the process call so root detection is unit-testable without
+/// spawning cargo.
+fn facts_from_metadata(meta: Metadata) -> WorkspaceFacts {
+    let members = meta
+        .packages
+        .into_iter()
+        .map(|p| {
+            let produces_bin = p.targets.iter().any(|t| t.kind.iter().any(|k| k == "bin"));
+            let depends_on = p
+                .dependencies
+                .into_iter()
+                .map(|d| CrateName(d.name))
+                .collect();
+            MemberFact {
+                name: CrateName(p.name),
+                produces_bin,
+                depends_on,
+            }
+        })
+        .collect();
+    WorkspaceFacts { members }
 }
 
 fn metadata(cargo: &str, cwd: &Path) -> Result<Metadata> {
@@ -76,7 +164,7 @@ pub fn derive_orphans(cargo: &str, cwd: &Path, closure_of: &str) -> Vec<String> 
 /// `cargo tree -p <root> --edges normal --prefix none`. We keep only names that
 /// are also workspace members (the caller intersects against members anyway, but
 /// restricting here keeps the set tight).
-fn dependency_closure(cargo: &str, cwd: &Path, root: &str) -> Option<HashSet<String>> {
+pub(crate) fn dependency_closure(cargo: &str, cwd: &Path, root: &str) -> Option<HashSet<String>> {
     let output = Command::new(cargo)
         .args(["tree", "-p", root, "--edges", "normal", "--prefix", "none"])
         .current_dir(cwd)
@@ -119,5 +207,50 @@ mod tests {
             .collect();
         orphans.sort();
         assert_eq!(orphans, vec!["orphan".to_string()]);
+    }
+
+    // Validates: Requirement 2.2, 2.3 -- facts_from_metadata records which
+    // members produce a binary and each member's declared dependency names.
+    #[test]
+    fn facts_from_metadata_records_bin_targets_and_edges() {
+        let json = r#"{
+            "workspace_root": "/ws",
+            "packages": [
+                {
+                    "name": "app",
+                    "targets": [{ "kind": ["bin"] }],
+                    "dependencies": [{ "name": "lib-mid" }]
+                },
+                {
+                    "name": "lib-mid",
+                    "targets": [{ "kind": ["lib"] }],
+                    "dependencies": []
+                },
+                {
+                    "name": "lib-top",
+                    "targets": [{ "kind": ["lib"] }],
+                    "dependencies": []
+                }
+            ]
+        }"#;
+        let meta: Metadata = serde_json::from_str(json).expect("parse fixture");
+        let facts = facts_from_metadata(meta);
+        assert_eq!(facts.members.len(), 3);
+
+        let app = facts
+            .members
+            .iter()
+            .find(|m| m.name.as_str() == "app")
+            .expect("app present");
+        assert!(app.produces_bin, "app has a bin target");
+        assert_eq!(app.depends_on, vec![CrateName("lib-mid".to_string())]);
+
+        let lib_mid = facts
+            .members
+            .iter()
+            .find(|m| m.name.as_str() == "lib-mid")
+            .expect("lib-mid present");
+        assert!(!lib_mid.produces_bin, "lib-mid is a library only");
+        assert!(lib_mid.depends_on.is_empty());
     }
 }

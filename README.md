@@ -73,6 +73,39 @@ cargo gate --app-only --closure-of my-app
   exclude list is derived at runtime (all members minus the closure) so it never
   drifts.
 
+## Wiring report (`cargo gate report`)
+
+```
+cargo gate report                       # auto-detect roots, write the report
+cargo gate report --root my-app         # explicit root(s); repeat --root for more
+cargo gate report --report-out wiring.md
+cargo gate report --log-dir .gate
+```
+
+`cargo gate report` writes a Markdown report of the workspace's dependency-graph
+wiring without running the gate. It is fully generic (any Cargo workspace) and
+multi-root:
+
+- **Roots** default to auto-detection: every workspace member that produces a
+  binary, plus every top-of-tree library (a library no other member depends on).
+  Override with one or more `--root <crate>` flags; an explicit list replaces
+  auto-detection. An unknown `--root` crate is a usage error (exit 2).
+- **Wired-in** crates are the union of every root's normal-edge dependency
+  closure, each listed with the root(s) that pull it in (attribution).
+- **Orphans** are members in no root's closure, under their own heading.
+- A **dependency tree** per root is included.
+
+The report measures DEPENDENCY-GRAPH wiring (a crate appears in a root's cargo
+dependency tree), NOT functional runtime registration; the report states this
+distinction explicitly. The gate-run summary section is sourced read-only from
+the most recent run in `gate.history.csv` (it notes clearly when no history
+exists).
+
+Default output: `<log-dir>/gate.wiring-report.md` (default `.gate/`); override
+with `--report-out`. This subcommand and its flags are an ADDITIVE change (new
+in 0.2.0): no existing flag, exit-code meaning, or `gate.history.csv` column
+changes.
+
 ## Exit codes
 
 | Code | Verdict |

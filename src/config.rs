@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 
 /// Mode of the run, recorded in history so ETAs compare like with like.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +74,11 @@ impl Scope {
     version
 )]
 pub struct Cli {
+    /// Optional subcommand. When absent, the gate runs with the flags below,
+    /// exactly as before (the public gate contract is preserved).
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Developer inner-loop mode: sets PROPTEST_CASES=32 for a quick signal.
     /// NOT the full gate.
     #[arg(long)]
@@ -116,6 +121,77 @@ pub struct Cli {
     pub release: bool,
 }
 
+/// The optional subcommands. Only `report` exists; its absence means "run the
+/// gate" (the historical default).
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Write a Markdown report of workspace dependency-graph wiring: which
+    /// members are reachable from the project's roots and which are orphans.
+    Report(ReportArgs),
+}
+
+/// Flags for the `report` subcommand.
+#[derive(Debug, Args)]
+pub struct ReportArgs {
+    /// Repeatable root override; an explicit list replaces auto-detection.
+    #[arg(long = "root", value_name = "CRATE")]
+    pub roots: Vec<String>,
+
+    /// Output path override; default <log-dir>/gate.wiring-report.md.
+    #[arg(long = "report-out", value_name = "FILE")]
+    pub out: Option<PathBuf>,
+
+    /// Log dir (shared meaning with the gate; default .gate).
+    #[arg(long, value_name = "DIR")]
+    pub log_dir: Option<PathBuf>,
+}
+
+/// Fully resolved configuration for a `report` run.
+#[derive(Debug, Clone)]
+pub struct ReportConfig {
+    /// Explicit root overrides; empty means auto-detect.
+    pub roots: Vec<String>,
+    /// Output path override; `None` means the default under `log_dir`.
+    pub out: Option<PathBuf>,
+    /// Log dir; `None` means the default `.gate`.
+    pub log_dir: Option<PathBuf>,
+}
+
+impl ReportConfig {
+    fn from_args(args: ReportArgs) -> Self {
+        ReportConfig {
+            roots: args.roots,
+            out: args.out,
+            log_dir: args.log_dir,
+        }
+    }
+}
+
+/// The resolved invocation: either run the gate or write a wiring report.
+#[derive(Debug, Clone)]
+pub enum Invocation {
+    Gate(Config),
+    Report(ReportConfig),
+}
+
+impl Invocation {
+    /// Parse argv, stripping the leading `gate` cargo-subcommand token, and
+    /// resolve to either a gate run or a report run.
+    pub fn from_args() -> Result<Self, clap::Error> {
+        let raw: Vec<String> = std::env::args().collect();
+        let filtered: Vec<String> = strip_subcommand_token(raw);
+        let cli = Cli::try_parse_from(filtered)?;
+        Ok(Self::from_cli(cli))
+    }
+
+    fn from_cli(cli: Cli) -> Self {
+        match cli.command {
+            Some(Command::Report(args)) => Invocation::Report(ReportConfig::from_args(args)),
+            None => Invocation::Gate(Config::from_cli(cli)),
+        }
+    }
+}
+
 /// Fully resolved configuration for a run.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -130,14 +206,6 @@ pub struct Config {
 }
 
 impl Config {
-    /// Parse argv, stripping the leading `gate` cargo-subcommand token.
-    pub fn from_args() -> Result<Self, clap::Error> {
-        let raw: Vec<String> = std::env::args().collect();
-        let filtered: Vec<String> = strip_subcommand_token(raw);
-        let cli = Cli::try_parse_from(filtered)?;
-        Ok(Self::from_cli(cli))
-    }
-
     fn from_cli(cli: Cli) -> Self {
         let mode = if cli.fast { Mode::Fast } else { Mode::Full };
         let scope = if let Some(name) = cli.crate_name {
@@ -286,6 +354,59 @@ mod tests {
         let cfg = Config::from_cli(cli);
         assert_eq!(cfg.build, Some(BuildTarget::Scope));
         assert!(cfg.release);
+    }
+
+    // Validates: Requirement 1.2 -- no subcommand still yields a gate run with
+    // the gate config unchanged.
+    #[test]
+    fn no_subcommand_resolves_to_a_gate_run() {
+        let cli = Cli::try_parse_from(["cargo-gate", "--fast"]).expect("parse");
+        match Invocation::from_cli(cli) {
+            Invocation::Gate(cfg) => {
+                assert_eq!(cfg.mode, Mode::Fast);
+                assert_eq!(cfg.scope, Scope::Workspace);
+            }
+            Invocation::Report(_) => panic!("expected a gate run"),
+        }
+    }
+
+    // Validates: Requirement 1.1, 2.4, 9.2 -- the report subcommand carries the
+    // roots and the output override.
+    #[test]
+    fn report_subcommand_carries_roots_and_out_override() {
+        let cli = Cli::try_parse_from([
+            "cargo-gate",
+            "report",
+            "--root",
+            "a",
+            "--root",
+            "b",
+            "--report-out",
+            "x.md",
+        ])
+        .expect("parse");
+        match Invocation::from_cli(cli) {
+            Invocation::Report(cfg) => {
+                assert_eq!(cfg.roots, vec!["a".to_string(), "b".to_string()]);
+                assert_eq!(cfg.out, Some(PathBuf::from("x.md")));
+            }
+            Invocation::Gate(_) => panic!("expected a report run"),
+        }
+    }
+
+    // Validates: Requirement 2.1 -- report with no --root carries an empty root
+    // list (auto-detect).
+    #[test]
+    fn report_subcommand_without_root_is_auto_detect() {
+        let cli = Cli::try_parse_from(["cargo-gate", "report"]).expect("parse");
+        match Invocation::from_cli(cli) {
+            Invocation::Report(cfg) => {
+                assert!(cfg.roots.is_empty());
+                assert_eq!(cfg.out, None);
+                assert_eq!(cfg.log_dir, None);
+            }
+            Invocation::Gate(_) => panic!("expected a report run"),
+        }
     }
 
     #[test]
