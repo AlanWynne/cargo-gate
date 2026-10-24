@@ -100,3 +100,38 @@ compile/clippy/fmt and the scoped new tests; the owner runs the full gate.
   - [ ] 10.1 Summarise criteria implemented, files changed, commands run, and
     results; request the owner's full `cargo gate` run as the authoritative
     green check. (testing split)
+
+- [x] 11. Bug fix: nextest early-cancellation summary parse (Requirement 12)
+  - [x] 11.1 Write failing unit tests in `nextest.rs` for `parse_nextest_summary`
+    BEFORE touching the regex: the fraction form
+    `Summary [ 202.706s] 5473/9916 tests run: 5472 passed, 1 failed, 0 skipped`
+    yields `TestTotals { run: 5473, passed: 5472, failed: 1 }` (AC-16); the plain
+    form `5000 tests run: 4998 passed, 2 failed` still yields run 5000 / passed
+    4998 / failed 2 (AC-17); a `10 tests run: 10 passed, 0 skipped` line yields
+    failed 0 and a line with a `(6 slow)`/`(2 leaky)` annotation still parses
+    (AC-18). Each test carries its `// Validates: Requirement 12.x` annotation.
+    (Req 12.1, 12.2, 12.3)
+  - [x] 11.2 Widen `nextest_summary_re()` to capture the RUN count and optionally
+    consume the `/T` total suffix (`(\d+)(?:/\d+)?\s+tests? run:`) so the run
+    count is the LEFT side of the fraction, leaving the passed/optional-failed
+    captures unchanged; confirm the new and existing `parse_nextest_summary`
+    tests pass. (Req 12.1, 12.2, 12.3; AC-16, AC-17, AC-18)
+    - NOTE: first attempt `(?:\d+/)?(\d+)` captured the RIGHT side (T=9916);
+      corrected to `(\d+)(?:/\d+)?` to capture R=5473.
+  - [x] 11.3 Write a failing test for the counts-unavailable guard: a test run
+    that did NOT succeed with unparsed totals (`None`) must yield a test
+    `StepResult` with `items_total = None` so `test_count_summary` reports
+    "counts unavailable" rather than borrowing the nextest-list total. Driven at
+    the pure-helper level (no cargo spawn): `fallback_items_total` unit tests plus
+    an end-to-end `test_count_summary` assertion. (Req 12.4; AC-19)
+  - [x] 11.4 In `gate.rs::run_test_phase`, gate the `final_progress.total`
+    fallback for `items_total` on run success (extracted to the pure
+    `fallback_items_total(run_succeeded, list_total)`) so a failed, unparsed run
+    leaves `items_total = None`; the guard test and the existing
+    `test_count_summary` tests pass. (Req 12.4; AC-19)
+  - [x] 11.5 Compile-only verification (agent): scoped `cargo fmt --check`
+    (clean), `cargo clippy -p cargo-gate -- -D warnings` (clean), and the scoped
+    new unit tests (6 parser + 3 guard, all pass); logs read back. Full suite
+    left to the owner's manual gate run. Confirmed no public-contract change
+    (CLI, exit codes, history CSV columns) and NO semver bump. (NFR-2, Req 11.1,
+    testing split)

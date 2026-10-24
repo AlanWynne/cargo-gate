@@ -381,13 +381,31 @@ fn run_test_phase(
             r.items_total = Some(t.run);
             r.items_passed = Some(t.passed);
             r.items_failed = Some(t.failed);
-        } else if let Some(t) = final_progress.total {
-            r.items_total = Some(t);
+        } else {
+            // Summary parse produced no totals. Only borrow the up-front
+            // nextest-list total when the run SUCCEEDED; on a failed run,
+            // borrowing it would yield a contradictory "<list-total> run,
+            // 0 passed, 0 failed" line, so leave items_total = None and let
+            // test_count_summary report "counts unavailable" (Requirement 12.4).
+            r.items_total = fallback_items_total(out.success(), final_progress.total);
         }
         r
     };
 
     Ok((build_result, test_result))
+}
+
+/// Decide the fallback `items_total` when the summary parse yielded no totals.
+/// Borrow the up-front `cargo nextest list` total only when the run succeeded;
+/// on a failed run, return `None` so the counts render as "counts unavailable"
+/// rather than a fabricated "<list-total> run, 0 passed, 0 failed" line
+/// (Requirement 12.4).
+fn fallback_items_total(run_succeeded: bool, list_total: Option<u64>) -> Option<u64> {
+    if run_succeeded {
+        list_total
+    } else {
+        None
+    }
 }
 
 /// Whether the optional build phase must be skipped because the gate so far is
@@ -812,6 +830,30 @@ mod tests {
     fn test_count_summary_reports_unavailable_without_totals() {
         let results = vec![StepResult::new(Step::Test, Status::Ok, Duration::ZERO)];
         assert_eq!(test_count_summary(&results), "counts unavailable");
+    }
+
+    #[test]
+    fn fallback_items_total_none_when_run_failed() {
+        // Validates: Requirement 12.4 -- a failed, unparsed run must NOT borrow
+        // the up-front nextest-list total, so counts render as unavailable.
+        assert_eq!(fallback_items_total(false, Some(9916)), None);
+    }
+
+    #[test]
+    fn fallback_items_total_borrows_list_total_when_run_succeeded() {
+        // Validates: Requirement 12.4 -- the list-total fallback is preserved for
+        // the success-but-unparsed case.
+        assert_eq!(fallback_items_total(true, Some(42)), Some(42));
+    }
+
+    #[test]
+    fn failed_run_with_list_total_reports_counts_unavailable() {
+        // Validates: Requirement 12.4 / AC-19 -- end to end, a test step whose
+        // items_total was left None (failed unparsed run) renders "counts
+        // unavailable", not "<list-total> run, 0 passed, 0 failed".
+        let mut t = StepResult::new(Step::Test, Status::Issues, Duration::ZERO);
+        t.items_total = fallback_items_total(false, Some(9916));
+        assert_eq!(test_count_summary(&[t]), "counts unavailable");
     }
 
     #[test]

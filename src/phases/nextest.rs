@@ -298,8 +298,16 @@ fn count_re() -> &'static Regex {
 fn nextest_summary_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
+        // The count before `tests run:` is a single integer in the normal case
+        // (`N tests run:`) but a FRACTION when nextest fast-fails and cancels
+        // early (`R/T tests run:`, e.g. `5473/9916`). Capture the RUN count --
+        // the LEFT side R -- and optionally consume the `/T` total suffix. In
+        // the plain case there is no suffix and the captured integer is N. The
+        // passed and optional failed captures are unchanged, so a trailing
+        // `, N skipped` clause and parenthetical annotations such as `(6 slow)`
+        // / `(2 leaky)` continue to parse.
         Regex::new(
-            r"Summary\s+\[.*?\]\s+(\d+)\s+tests? run:\s+(\d+)\s+passed(?:.*?(\d+)\s+failed)?",
+            r"Summary\s+\[.*?\]\s+(\d+)(?:/\d+)?\s+tests? run:\s+(\d+)\s+passed(?:.*?(\d+)\s+failed)?",
         )
         .expect("valid regex")
     })
@@ -498,6 +506,71 @@ mod tests {
         assert_eq!(t.run, 10);
         assert_eq!(t.passed, 10);
         assert_eq!(t.failed, 0);
+    }
+
+    #[test]
+    fn parses_nextest_summary_early_cancellation_fraction_form() {
+        // Validates: Requirement 12.1 -- the fast-fail `R/T tests run:` fraction
+        // form parses R (the run count, left of the fraction), passed, and failed.
+        let text = "   Summary [ 202.706s] 5473/9916 tests run: 5472 passed, 1 failed, 0 skipped";
+        let t = parse_nextest_summary(text).expect("summary");
+        assert_eq!(
+            t,
+            TestTotals {
+                run: 5473,
+                passed: 5472,
+                failed: 1
+            }
+        );
+    }
+
+    #[test]
+    fn parses_nextest_summary_plain_form_unchanged() {
+        // Validates: Requirement 12.2 -- the plain `N tests run:` form still
+        // parses run/passed/failed exactly as before the fraction-form fix.
+        let text = "   Summary [  12.345s] 5000 tests run: 4998 passed, 2 failed";
+        let t = parse_nextest_summary(text).expect("summary");
+        assert_eq!(
+            t,
+            TestTotals {
+                run: 5000,
+                passed: 4998,
+                failed: 2
+            }
+        );
+    }
+
+    #[test]
+    fn parses_nextest_summary_failed_defaults_to_zero_with_skipped() {
+        // Validates: Requirement 12.3 -- omitted `, F failed` defaults to 0 and a
+        // trailing `, S skipped` clause is tolerated.
+        let text = "   Summary [  1.00s] 10 tests run: 10 passed, 0 skipped";
+        let t = parse_nextest_summary(text).expect("summary");
+        assert_eq!(
+            t,
+            TestTotals {
+                run: 10,
+                passed: 10,
+                failed: 0
+            }
+        );
+    }
+
+    #[test]
+    fn parses_nextest_summary_with_parenthetical_annotations() {
+        // Validates: Requirement 12.3 -- `(N slow)` / `(N leaky)` annotations do
+        // not break parsing of run/passed/failed.
+        let text =
+            "   Summary [  30.0s] 100 tests run: 98 passed (6 slow, 2 leaky), 2 failed, 0 skipped";
+        let t = parse_nextest_summary(text).expect("summary");
+        assert_eq!(
+            t,
+            TestTotals {
+                run: 100,
+                passed: 98,
+                failed: 2
+            }
+        );
     }
 
     #[test]

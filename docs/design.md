@@ -427,3 +427,51 @@ flags (`--root`, `--report-out`, `--log-dir` reused), and a new output file
 `gate.wiring-report.md`. No existing flag, the exit-code meanings (0/1/2), or the
 `gate.history.csv` columns change (the history file is read-only here). Per
 semver this is a MINOR release; `Cargo.toml` `version` goes `0.1.0 -> 0.2.0`.
+
+## 9. Bug fix: nextest early-cancellation summary parse (Requirement 12)
+
+Localized fix; it changes module boundaries in no way and touches NONE of the
+public contract (CLI surface, exit codes, history CSV columns) -- so it is a pure
+mis-parse correction, not a breaking change, and needs no semver bump.
+
+Root cause: `nextest_summary_re()` in `src/phases/nextest.rs` matches a single
+integer immediately before `tests run:`:
+`Summary\s+\[.*?\]\s+(\d+)\s+tests? run:\s+(\d+)\s+passed(?:.*?(\d+)\s+failed)?`.
+When nextest fast-fails it prints the fraction form `5473/9916 tests run:`, which
+this pattern cannot match, so `parse_nextest_summary` returns `None`. Downstream
+in `gate.rs::run_test_phase`, a `None` totals then falls back to the up-front
+`cargo nextest list` count for `items_total` while leaving `items_passed`/
+`items_failed` unset, which `test_count_summary` prints via `unwrap_or(0)` as the
+contradictory "9916 run, 0 passed, 0 failed".
+
+Two concrete, localized changes:
+
+1. `nextest_summary_re()` (and thus `parse_nextest_summary`): widen the run-count
+   portion to accept BOTH the plain `N tests run:` form and the fraction
+   `R/T tests run:` form, capturing R (the left side of the fraction) as the run
+   count. The plain form keeps R == the single number. The passed capture and the
+   optional `failed` capture are unchanged, so the existing optional `, F failed`
+   (defaulting to 0), trailing `, S skipped`, and parenthetical annotations such
+   as `(6 slow)`/`(2 leaky)` continue to parse. The chosen regex shape makes the
+   count before `tests run:` an optional `\d+/` fraction prefix followed by the
+   captured run integer:
+   `Summary\s+\[.*?\]\s+(?:\d+/)?(\d+)\s+tests? run:\s+(\d+)\s+passed(?:.*?(\d+)\s+failed)?`.
+   This is the smallest change that captures the RUN count (not the total `T`) in
+   the fraction case while leaving every already-passing case untouched.
+
+2. `run_test_phase` None-totals guard: when `totals` is `None` AND the run did
+   not succeed, do NOT borrow the up-front nextest-list total for `items_total`.
+   Leaving `items_total = None` makes `test_count_summary` already print "counts
+   unavailable" (it keys off `items_total`), so no change to `test_count_summary`
+   is needed -- only the fallback assignment in `run_test_phase` is gated on
+   success. The existing fallback to the list total stays only for the
+   success-but-unparsed case (if any), preserving prior behaviour where it was
+   sensible.
+
+Testability: change 1 is covered by pure unit tests on `parse_nextest_summary`
+(fraction form, plain form, skipped/annotation tolerance) in `nextest.rs`. Change
+2 is covered by a `run_test_phase`-level assertion that a failed, unparsed run
+yields `items_total = None` -- or, if the full phase is awkward to drive in a unit
+test, by a focused test on the count-summary/guard logic reachable without
+spawning cargo. `test_count_summary` already has unit tests asserting both
+"counts unavailable" and the formatted-totals cases.
