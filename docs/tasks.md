@@ -101,6 +101,38 @@ compile/clippy/fmt and the scoped new tests; the owner runs the full gate.
     results; request the owner's full `cargo gate` run as the authoritative
     green check. (testing split)
 
+- [x] 12. Default scope = Cargo default-members, with --workspace/--all opt-in (Requirement 16)
+  - [x] 12.1 Update the three tests that encode the old default and add the new
+    ones BEFORE/with the change: `config::default_scope_is_full_workspace` ->
+    `default_scope_is_default_members` (AC-20); `nextest::scope_args` default-test
+    -> `scope_args_for_default_members_is_empty` (AC-21);
+    `fmt_clippy::clippy_args_use_workspace_by_default` ->
+    `clippy_args_default_members_emit_no_workspace` (AC-21). Add tests for
+    `--workspace`/`--all` selecting the full set (AC-22), the distinct label
+    values (AC-23), and precedence (AC-24). Each carries a
+    `// Validates: Requirement 16.x` annotation. (Req 16.1-16.4)
+  - [x] 12.2 Add `Scope::DefaultMembers`; update `Scope::label()`
+    ("default-members") and `Scope::describe()`; add the `--workspace`
+    flag with `visible_alias = "all"`; set the precedence in `Config::from_cli`
+    (`--crate` > `--app-only` > `--workspace`/`--all` > default). (Req 16.1, 16.2,
+    16.3, 16.4, 16.6)
+  - [x] 12.3 Add the `Scope::DefaultMembers => Vec::new()` arm to
+    `nextest::scope_args` (the single chokepoint) so no `-p`/`--workspace` is
+    emitted. (Req 16.1, 16.5)
+  - [x] 12.4 Make `clippy_args` delegate to `nextest::scope_args(scope, &[])` so
+    fmt/clippy/nextest honour the default consistently (no silent `--workspace`).
+    (Req 16.5)
+  - [x] 12.5 Bump `Cargo.toml` `0.2.0 -> 0.3.0`; update `CHANGELOG.md`
+    [Unreleased]/[0.3.0] with the behaviour change, the new flag, and the new
+    history label value; update `docs/requirements.md` (Req 16), `docs/design.md`
+    (section 10), and create `docs/STATUS.md`. (Req 16, NFR-2)
+  - [x] 12.6 Compile-only verification (agent): scoped `cargo check` (clean),
+    `cargo clippy --all-targets -- -D warnings` (clean), `cargo fmt --check`
+    (clean), and the focused new/changed unit tests (all pass); logs read back.
+    Full suite left to the owner's manual gate run. Confirmed default mode emits
+    no `--workspace`/no `-p` and `--workspace`/`--all` select the full set.
+    (NFR-6, testing split)
+
 - [x] 11. Bug fix: nextest early-cancellation summary parse (Requirement 12)
   - [x] 11.1 Write failing unit tests in `nextest.rs` for `parse_nextest_summary`
     BEFORE touching the regex: the fraction form

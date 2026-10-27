@@ -277,6 +277,59 @@ contract).
   (not the borrowed nextest-list total) so `test_count_summary` reports
   "counts unavailable" rather than "<list-total> run, 0 passed, 0 failed".
 
+## Requirement 16 -- Default scope = Cargo default-members (with --workspace/--all opt-in)
+
+CONTEXT: on a large workspace where only a fraction of crates are wired into the
+product, gating the whole workspace on every change is slow. Cargo already has a
+first-class mechanism for "the crates that matter by default": the manifest's
+`default-members`. This requirement makes the gate's DEFAULT scope follow Cargo
+`default-members`, and adds an explicit flag to request the full workspace.
+
+This is a DEFAULT-BEHAVIOUR change and is semver-notable: a bare `cargo gate`
+that previously gated `--workspace` now gates `default-members`. It is ADDITIVE
+in every other respect (a new flag, a new history label value) and changes NO
+exit-code meaning and NO `gate.history.csv` column (NFR-2). Released as a MINOR
+bump (`0.2.0 -> 0.3.0`).
+
+- 16.1 WHEN the tool is invoked with no explicit scope flag (`--crate`,
+  `--app-only`, `--workspace`/`--all`) THE gate SHALL select the DEFAULT scope,
+  which emits NO package-selection argument (no `--workspace`, no `-p`,
+  no `--exclude`) to any phase (fmt, clippy, nextest list/run, cargo test, and
+  the optional build), so Cargo falls back to the workspace `default-members`
+  set (or the whole workspace when the manifest declares no `default-members`).
+- 16.2 WHEN the tool is invoked with `--workspace` (or its alias `--all`) THE
+  gate SHALL select the FULL workspace member set (emit `--workspace`), the
+  behaviour that was the default before this change.
+- 16.3 WHEN history rows are written for a DEFAULT-scope run THE gate SHALL
+  record the `scope` column with the distinct label value `default-members`, so
+  per-scope ETA medians for the default scope do not mix with full-workspace
+  (`workspace`) ETAs. THE set of `gate.history.csv` COLUMNS SHALL be unchanged
+  (public contract); only a new label VALUE is introduced.
+- 16.4 WHEN more than one scope selector is supplied THE gate SHALL apply the
+  precedence `--crate` > `--app-only` > `--workspace`/`--all` > DEFAULT
+  (`default-members`): the most specific selector wins.
+- 16.5 WHEN the DEFAULT scope is active THE clippy, fmt, and test phases SHALL
+  all honour it consistently (a single package-selection chokepoint), so none of
+  them silently gates `--workspace` while another gates `default-members`.
+- 16.6 WHEN console output names the active scope THE output SHALL remain ASCII
+  and SHALL describe the default scope distinctly from the full workspace.
+
+### Acceptance Criteria for Requirement 16
+
+- AC-20 (Req 16.1) With no scope flag, `Config::from_cli` resolves
+  `Scope::DefaultMembers`.
+- AC-21 (Req 16.1) `scope_args(&Scope::DefaultMembers, &[])` returns an empty
+  vector (no `-p`, no `--workspace`), and `clippy_args(&Scope::DefaultMembers)`
+  contains neither `--workspace` nor `-p`.
+- AC-22 (Req 16.2) `--workspace` and `--all` both resolve `Scope::Workspace`;
+  `scope_args(&Scope::Workspace, &[])` returns `["--workspace"]` and
+  `clippy_args(&Scope::Workspace)` contains `--workspace`.
+- AC-23 (Req 16.3) `Scope::DefaultMembers.label()` is `"default-members"` and
+  `Scope::Workspace.label()` is `"workspace"` (distinct values; same columns).
+- AC-24 (Req 16.4) Given `--workspace --crate x`, the resolved scope is
+  `Crate { x }`; given `--workspace --app-only --closure-of app`, it is
+  `AppOnly { app }` (the more specific selector wins over `--workspace`).
+
 ## Out of Scope
 
 - Functional-registration analysis (whether a crate is actually dispatched or

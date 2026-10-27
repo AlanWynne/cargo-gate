@@ -36,15 +36,15 @@ fn fmt_args() -> Vec<String> {
 }
 
 /// Build the clippy argument vector for a scope, in JSON message format.
+///
+/// Clippy shares the SAME package-selection chokepoint as the test phase
+/// (`nextest::scope_args`), so the default-members behaviour is identical across
+/// fmt/clippy/nextest: `Scope::DefaultMembers` emits no `--workspace`/`-p` and
+/// Cargo falls back to the workspace default-members set. Clippy takes no orphan
+/// excludes (the gate never passed them), so an empty orphan list is used.
 fn clippy_args(scope: &Scope) -> Vec<String> {
     let mut args = vec!["clippy".to_string()];
-    match scope {
-        Scope::Crate { name } => {
-            args.push("-p".to_string());
-            args.push(name.clone());
-        }
-        _ => args.push("--workspace".to_string()),
-    }
+    args.extend(crate::phases::nextest::scope_args(scope, &[]));
     // JSON diagnostics on stdout.
     args.push("--message-format=json".to_string());
     args
@@ -199,7 +199,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clippy_args_use_workspace_by_default() {
+    fn clippy_args_default_members_emit_no_workspace() {
+        // Validates: Requirement 16.1 -- the default scope emits NO --workspace
+        // (and no -p) for clippy, so Cargo falls back to default-members.
+        let args = clippy_args(&Scope::DefaultMembers);
+        assert!(!args.contains(&"--workspace".to_string()));
+        assert!(!args.contains(&"-p".to_string()));
+        assert!(args.contains(&"--message-format=json".to_string()));
+    }
+
+    #[test]
+    fn clippy_args_use_workspace_when_requested() {
+        // Validates: Requirement 16.2 -- --workspace selects the full member set
+        // for clippy.
         let args = clippy_args(&Scope::Workspace);
         assert!(args.contains(&"--workspace".to_string()));
         assert!(args.contains(&"--message-format=json".to_string()));

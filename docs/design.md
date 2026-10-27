@@ -475,3 +475,70 @@ yields `items_total = None` -- or, if the full phase is awkward to drive in a un
 test, by a focused test on the count-summary/guard logic reachable without
 spawning cargo. `test_count_summary` already has unit tests asserting both
 "counts unavailable" and the formatted-totals cases.
+
+## 10. Default scope = Cargo default-members (Requirement 16)
+
+Makes the gate's DEFAULT package scope follow Cargo `default-members`, with an
+explicit `--workspace`/`--all` opt-in for the full member set. This extends the
+scope model of sections 2 (`config`) and 3.8 (`workspace.rs`) without changing
+any other decision. It is the one semver-notable default change (0.2.0 -> 0.3.0).
+
+### 10.1 The new `Scope` variant and precedence (`config.rs`)
+
+`Scope` gains a `DefaultMembers` variant, which becomes the resolved scope when
+no explicit selector is given. `Cli` gains a `--workspace` flag with a clap
+`visible_alias = "all"`, mapping to the existing `Scope::Workspace`. The existing
+`--crate`, `--app-only`/`--closure-of` flags are unchanged. `Config::from_cli`
+resolves scope by precedence (most specific first, Req 16.4):
+
+```
+--crate <name>            -> Scope::Crate { name }
+--app-only --closure-of   -> Scope::AppOnly { closure_of }
+--workspace | --all       -> Scope::Workspace
+(none)                    -> Scope::DefaultMembers        // the new default
+```
+
+`Scope::label()` returns the distinct value `"default-members"` for the new
+variant (Req 16.3) and `"workspace"` for `Scope::Workspace`; the history CSV
+columns are untouched (NFR-2) -- only a new label VALUE joins the existing ones.
+`Scope::describe()` gives the default scope its own ASCII banner text (Req 16.6).
+
+### 10.2 The single package-selection chokepoint (Req 16.5)
+
+`nextest::scope_args` is the ONE place that turns a `Scope` into cargo/nextest
+package-selection args. It gains a `Scope::DefaultMembers => Vec::new()` arm:
+emitting NO args means cargo/nextest fall back to `default-members`. Every test
+path already routes through `scope_args` (`nextest_list_args`, `nextest_run_args`,
+`cargo_test_args`, `cargo_build_args`).
+
+The fmt/clippy phase previously had its OWN scope match in `clippy_args`
+(`_ => --workspace`), which would have silently kept gating `--workspace` under
+the new default. To satisfy Req 16.5 (consistent honouring across phases),
+`clippy_args` now DELEGATES to `nextest::scope_args(scope, &[])` so clippy shares
+the exact same chokepoint. Clippy never received orphan excludes (the gate never
+passed them), so an empty orphan slice preserves clippy's prior AppOnly behaviour
+(`--workspace` with no `--exclude`) while gaining the `DefaultMembers` (empty) and
+`Crate` (`-p`) behaviours identically to the test phase. `cargo fmt --check` takes
+no package selection and is unaffected.
+
+`gate.rs` is unchanged: it already threads `config.scope` and
+`config.scope.label()` through the phases and history. `resolve_orphans` returns
+empty for any non-`AppOnly` scope, so `DefaultMembers` derives no orphans.
+
+### 10.3 Contract and semver (Req 16, NFR-2)
+
+ADDITIVE except for the one default change: new `--workspace`/`--all` flag, new
+`Scope::DefaultMembers` variant, new `"default-members"` history label value. No
+exit-code meaning changes; no `gate.history.csv` column changes. `Cargo.toml`
+`version` moves `0.2.0 -> 0.3.0` (MINOR, semver-notable default change) with a
+prominent CHANGELOG behaviour-change note.
+
+### 10.4 Testability
+
+All changes are covered by pure unit tests with no cargo spawn: `config.rs`
+resolves the default and `--workspace`/`--all` to the expected `Scope`, asserts
+precedence (AC-20, AC-22, AC-24), and the distinct label values (AC-23);
+`nextest.rs` asserts `scope_args(DefaultMembers)` is empty and `Workspace` is
+`["--workspace"]` (AC-21, AC-22); `fmt_clippy.rs` asserts `clippy_args` emits no
+`--workspace`/`-p` for the default and `--workspace` when requested (AC-21,
+AC-22). The authoritative full-suite run is the owner's manual gate.

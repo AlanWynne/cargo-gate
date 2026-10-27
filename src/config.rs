@@ -35,7 +35,12 @@ pub enum BuildTarget {
 /// The test-step package scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
-    /// Full `--workspace` -- the canonical completion gate.
+    /// The DEFAULT: let Cargo fall back to the workspace `default-members` set.
+    /// Emits NO package selection (no `--workspace`, no `-p`), so Cargo selects
+    /// `default-members` (or the whole workspace when the manifest declares no
+    /// `default-members`).
+    DefaultMembers,
+    /// Full `--workspace` (alias `--all`) -- every workspace member.
     Workspace,
     /// `--workspace --exclude <orphans>`: only the dependency closure of a binary.
     AppOnly { closure_of: String },
@@ -44,9 +49,13 @@ pub enum Scope {
 }
 
 impl Scope {
-    /// Short label used as the history `scope` column (compared for ETA).
+    /// Short label used as the history `scope` column (compared for ETA). The
+    /// DEFAULT scope carries its OWN label value ("default-members") so its
+    /// per-scope ETA medians never mix with the full-workspace history. This is
+    /// a new label VALUE only; the CSV columns are unchanged (public contract).
     pub fn label(&self) -> String {
         match self {
+            Scope::DefaultMembers => "default-members".to_string(),
             Scope::Workspace => "workspace".to_string(),
             Scope::AppOnly { .. } => "app-only".to_string(),
             Scope::Crate { name } => format!("crate:{name}"),
@@ -56,7 +65,8 @@ impl Scope {
     /// Human-readable description for console banners.
     pub fn describe(&self) -> String {
         match self {
-            Scope::Workspace => "workspace (full completion gate)".to_string(),
+            Scope::DefaultMembers => "default-members (Cargo default set)".to_string(),
+            Scope::Workspace => "workspace (all members)".to_string(),
             Scope::AppOnly { closure_of } => {
                 format!("app-only (dependency closure of {closure_of})")
             }
@@ -83,6 +93,12 @@ pub struct Cli {
     /// NOT the full gate.
     #[arg(long)]
     pub fast: bool,
+
+    /// Gate the FULL workspace (every member), the behaviour that used to be the
+    /// default. Without this the gate runs over Cargo's `default-members` set.
+    /// `--all` is an accepted alias.
+    #[arg(long = "workspace", visible_alias = "all")]
+    pub workspace: bool,
 
     /// Test only the dependency closure of the crate named by --closure-of,
     /// excluding workspace orphan crates. Requires --closure-of.
@@ -208,6 +224,8 @@ pub struct Config {
 impl Config {
     fn from_cli(cli: Cli) -> Self {
         let mode = if cli.fast { Mode::Fast } else { Mode::Full };
+        // Scope precedence (most specific wins):
+        //   --crate > --app-only > --workspace/--all > DEFAULT (default-members).
         let scope = if let Some(name) = cli.crate_name {
             Scope::Crate { name }
         } else if cli.app_only {
@@ -215,8 +233,10 @@ impl Config {
             Scope::AppOnly {
                 closure_of: cli.closure_of.expect("clap enforces --closure-of"),
             }
-        } else {
+        } else if cli.workspace {
             Scope::Workspace
+        } else {
+            Scope::DefaultMembers
         };
         let log_dir = cli.log_dir.unwrap_or_else(|| PathBuf::from(".gate"));
         let build = match cli.build {
@@ -268,11 +288,71 @@ mod tests {
     }
 
     #[test]
-    fn default_scope_is_full_workspace() {
+    fn default_scope_is_default_members() {
+        // Validates: Requirement 16.1 -- bare `cargo gate` scopes to Cargo
+        // default-members (no --workspace, no -p), the new default.
         let cli = Cli::try_parse_from(["cargo-gate"]).expect("parse");
         let cfg = Config::from_cli(cli);
-        assert_eq!(cfg.scope, Scope::Workspace);
+        assert_eq!(cfg.scope, Scope::DefaultMembers);
         assert_eq!(cfg.mode, Mode::Full);
+    }
+
+    #[test]
+    fn workspace_flag_selects_full_workspace() {
+        // Validates: Requirement 16.2 -- --workspace selects the full member set.
+        let cli = Cli::try_parse_from(["cargo-gate", "--workspace"]).expect("parse");
+        let cfg = Config::from_cli(cli);
+        assert_eq!(cfg.scope, Scope::Workspace);
+    }
+
+    #[test]
+    fn all_alias_selects_full_workspace() {
+        // Validates: Requirement 16.2 -- --all is an alias for --workspace.
+        let cli = Cli::try_parse_from(["cargo-gate", "--all"]).expect("parse");
+        let cfg = Config::from_cli(cli);
+        assert_eq!(cfg.scope, Scope::Workspace);
+    }
+
+    #[test]
+    fn crate_flag_beats_workspace_flag() {
+        // Validates: Requirement 16.4 -- precedence --crate > --workspace.
+        let cli = Cli::try_parse_from(["cargo-gate", "--workspace", "--crate", "ff-keys"])
+            .expect("parse");
+        let cfg = Config::from_cli(cli);
+        assert_eq!(
+            cfg.scope,
+            Scope::Crate {
+                name: "ff-keys".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn app_only_beats_workspace_flag() {
+        // Validates: Requirement 16.4 -- precedence --app-only > --workspace.
+        let cli = Cli::try_parse_from([
+            "cargo-gate",
+            "--workspace",
+            "--app-only",
+            "--closure-of",
+            "my-app",
+        ])
+        .expect("parse");
+        let cfg = Config::from_cli(cli);
+        assert_eq!(
+            cfg.scope,
+            Scope::AppOnly {
+                closure_of: "my-app".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn default_members_and_workspace_labels_differ() {
+        // Validates: Requirement 16.3 -- the default scope carries its own
+        // history label value so its ETAs do not mix with full-workspace ones.
+        assert_eq!(Scope::DefaultMembers.label(), "default-members");
+        assert_eq!(Scope::Workspace.label(), "workspace");
     }
 
     #[test]
@@ -364,7 +444,7 @@ mod tests {
         match Invocation::from_cli(cli) {
             Invocation::Gate(cfg) => {
                 assert_eq!(cfg.mode, Mode::Fast);
-                assert_eq!(cfg.scope, Scope::Workspace);
+                assert_eq!(cfg.scope, Scope::DefaultMembers);
             }
             Invocation::Report(_) => panic!("expected a gate run"),
         }

@@ -41,8 +41,14 @@ impl Runner {
 }
 
 /// Translate a scope into the package-selection args shared by list and run.
+///
+/// This is the single chokepoint for package selection. `Scope::DefaultMembers`
+/// (the new default) emits NO selection args at all, so Cargo falls back to the
+/// workspace `default-members` set.
 pub fn scope_args(scope: &Scope, orphans: &[String]) -> Vec<String> {
     match scope {
+        // No -p and no --workspace: let Cargo select `default-members`.
+        Scope::DefaultMembers => Vec::new(),
         Scope::Crate { name } => vec!["-p".to_string(), name.clone()],
         Scope::Workspace => vec!["--workspace".to_string()],
         Scope::AppOnly { .. } => {
@@ -323,6 +329,17 @@ fn cargo_test_result_re() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scope_args_for_default_members_is_empty() {
+        // Validates: Requirement 16.1 -- the default scope emits NO -p and NO
+        // --workspace, so cargo/nextest falls back to default-members.
+        let args: Vec<String> = scope_args(&Scope::DefaultMembers, &[]);
+        assert!(
+            args.is_empty(),
+            "default-members must emit no selection args"
+        );
+    }
 
     #[test]
     fn scope_args_for_workspace_and_crate_and_apponly() {

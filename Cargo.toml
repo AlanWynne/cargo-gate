@@ -1,6 +1,6 @@
 [package]
 name = "cargo-gate"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.80"
 description = "A unified verification gate for Cargo projects: runs fmt, clippy, and nextest with per-step progress, history, and combined/review log artifacts."
